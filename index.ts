@@ -1,7 +1,6 @@
 import express, { Request, Response } from 'express';
 import cors from 'cors';
 import {
-    User,
     insertUser,
     deleteUser,
     getUserByHandle,
@@ -13,6 +12,11 @@ import {
     acceptFriendRequest,
     rejectFriendRequest,
     cancelFriendRequest,
+    createConnectionRequest,
+    getConnectionRequestsForUser,
+    acceptConnectionRequest,
+    rejectConnectionRequest,
+    cancelConnectionRequest,
     UserWithPassword,
 } from './db';
 
@@ -79,14 +83,9 @@ app.delete('/deleteuser/:id', (req: Request, res: Response) => {
 });
 
 app.post('/friend-requests', (req: Request, res: Response) => {
-    const { requesterId, receiverHandle } = req.body as { requesterId: number; receiverHandle: string };
-    const receiver = getUserByHandle(receiverHandle);
+    const { requesterId, receiverId } = req.body as { requesterId: number; receiverId: number };
 
-    if (!receiver) {
-        return res.status(404).json({ status: 'error', message: 'Receiver not found.' });
-    }
-
-    const friendRequest = createFriendRequest(requesterId, receiver.id);
+    const friendRequest = createFriendRequest(requesterId, receiverId);
 
     if (!friendRequest) {
         return res.status(400).json({
@@ -146,6 +145,63 @@ app.post('/friend-requests/:requestId/cancel', (req: Request, res: Response) => 
     }
 
     res.json({ status: 'success', message: 'Friend request canceled.' });
+});
+
+app.post('/connection-requests', (req: Request, res: Response) => {
+    const { requesterId, receiverId, title, description } = req.body as { requesterId: number; receiverId: number; title: string; description: string };
+    const connectionRequest = createConnectionRequest(requesterId, receiverId, title, description);
+
+    if (!connectionRequest) {
+        return res.status(400).json({
+            status: 'error',
+            message: 'Unable to create connection request. The users must already be friends and no pending connection request or connection may exist.',
+        });
+    }
+
+    res.json({ status: 'success', connectionRequest });
+});
+
+app.get('/connection-requests/:id', (req: Request, res: Response) => {
+    const { id } = req.params as { id: string };
+    const userid = Number(id);
+    const connectionRequests = getConnectionRequestsForUser(userid);
+    res.json(connectionRequests);
+});
+
+app.post('/connection-requests/:requestId/accept', (req: Request, res: Response) => {
+    const { requestId } = req.params as { requestId: string };
+    const { userId } = req.body as { userId: number };
+    const ok = acceptConnectionRequest(Number(requestId), userId);
+
+    if (!ok) {
+        return res.status(400).json({ status: 'error', message: 'Unable to accept connection request.' });
+    }
+
+    res.json({ status: 'success', message: 'Connection request accepted.' });
+});
+
+app.post('/connection-requests/:requestId/reject', (req: Request, res: Response) => {
+    const { requestId } = req.params as { requestId: string };
+    const { userId } = req.body as { userId: number };
+    const ok = rejectConnectionRequest(Number(requestId), userId);
+
+    if (!ok) {
+        return res.status(400).json({ status: 'error', message: 'Unable to reject connection request.' });
+    }
+
+    res.json({ status: 'success', message: 'Connection request rejected.' });
+});
+
+app.post('/connection-requests/:requestId/cancel', (req: Request, res: Response) => {
+    const { requestId } = req.params as { requestId: string };
+    const { userId } = req.body as { userId: number };
+    const ok = cancelConnectionRequest(Number(requestId), userId);
+
+    if (!ok) {
+        return res.status(400).json({ status: 'error', message: 'Unable to cancel connection request.' });
+    }
+
+    res.json({ status: 'success', message: 'Connection request canceled.' });
 });
 
 

@@ -29,6 +29,23 @@ export interface Friendship {
     user2_id: number;
 }
 
+export interface ConnectionRequest {
+    id: number;
+    title: string;
+    description: string;
+    requester_id: number;
+    receiver_id: number;
+    created_at?: string;
+}
+
+export interface Connection {
+    id: number;
+    friendship_id: number;
+    folder_path: string;
+    created_at?: string;
+    last_modified?: string;
+}
+
 export function hashPassword(password: string): string {
     const salt = randomBytes(16).toString('hex');
     const hash = scryptSync(password + PASSWORD_PEPPER, salt, PASSWORD_KEYLEN).toString('hex');
@@ -81,22 +98,41 @@ function normalizeFriendPair(userA: number, userB: number): [number, number] {
 }
 
 export function getFriendRequestById(requestId: number): FriendRequest | null {
-    const stmt = db.prepare('SELECT * FROM FriendRequests WHERE id = ?');
+    const stmt = db.prepare("SELECT * FROM FriendRequests WHERE id = ? ");
     const row = stmt.get(requestId) as FriendRequest | undefined;
     return typeof row?.id === 'number' ? row : null;
 }
 
 export function getFriendRequestsForUser(userid: number): FriendRequest[] {
     const stmt = db.prepare(
-        'SELECT * FROM FriendRequests WHERE requester_id = ? OR receiver_id = ? ORDER BY id DESC'
+        "SELECT * FROM FriendRequests WHERE(requester_id = ? OR receiver_id = ?) ORDER BY id DESC"
     );
     return stmt.all(userid, userid) as FriendRequest[];
+}
+
+export function getConnectionRequestById(requestId: number): ConnectionRequest | null {
+    const stmt = db.prepare('SELECT * FROM ConnectionRequests WHERE id = ?');
+    const row = stmt.get(requestId) as ConnectionRequest | undefined;
+    return typeof row?.id === 'number' ? row : null;
+}
+
+export function getConnectionRequestsForUser(userid: number): ConnectionRequest[] {
+    const stmt = db.prepare(
+        `SELECT * FROM ConnectionRequests WHERE (requester_id = ? OR receiver_id = ?) ORDER BY id DESC`
+    );
+    return stmt.all(userid, userid) as ConnectionRequest[];
 }
 
 export function getFriendshipByUsers(userA: number, userB: number): Friendship | null {
     const [user1Id, user2Id] = normalizeFriendPair(userA, userB);
     const stmt = db.prepare('SELECT * FROM Friendships WHERE user1_id = ? AND user2_id = ?');
     const row = stmt.get(user1Id, user2Id) as Friendship | undefined;
+    return typeof row?.id === 'number' ? row : null;
+}
+
+export function getFriendshipById(friendshipId: number): Friendship | null {
+    const stmt = db.prepare('SELECT * FROM Friendships WHERE id = ?');
+    const row = stmt.get(friendshipId) as Friendship | undefined;
     return typeof row?.id === 'number' ? row : null;
 }
 
@@ -117,17 +153,38 @@ export function createFriendRequest(requesterId: number, receiverId: number): Fr
     if (getFriendshipByUsers(requesterId, receiverId)) return null;
 
     const existingRequestStmt = db.prepare(
-        `SELECT id
-         FROM FriendRequests
-         WHERE (requester_id = ? AND receiver_id = ?)
-            OR (requester_id = ? AND receiver_id = ?)`
+        `SELECT id FROM FriendRequests WHERE ((requester_id = ? AND receiver_id = ?) OR (requester_id = ? AND receiver_id = ?))`
     );
     const existingRequest = existingRequestStmt.get(requesterId, receiverId, receiverId, requesterId);
     if (existingRequest) return null;
-
-    const stmt = db.prepare('INSERT INTO FriendRequests (requester_id, receiver_id) VALUES (?, ?)');
+    const stmt = db.prepare("INSERT INTO FriendRequests (requester_id, receiver_id) VALUES (?, ?)");
     const info = stmt.run(requesterId, receiverId);
     return getFriendRequestById(Number(info.lastInsertRowid));
+}
+
+export function createConnectionRequest(
+    requesterId: number,
+    receiverId: number,
+    title: string,
+    description: string
+): ConnectionRequest | null {
+    if (requesterId === receiverId) return null;
+
+    const friendship = getFriendshipByUsers(requesterId, receiverId);
+    if (!friendship) return null;
+
+    const existingRequestStmt = db.prepare(
+        `SELECT id FROM ConnectionRequests WHERE requester_id = ? AND receiver_id = ?`);
+    const existingRequest = existingRequestStmt.get(requesterId, receiverId);
+    if (existingRequest) return null;
+
+    const existingConnectionStmt = db.prepare('SELECT id FROM Connections WHERE friendship_id = ?');
+    const existingConnection = existingConnectionStmt.get(friendship.id);
+    if (existingConnection) return null;
+
+    const stmt = db.prepare('INSERT INTO ConnectionRequests (title, description, requester_id, receiver_id) VALUES (?, ?, ?, ?)');
+    const info = stmt.run(title, description, requesterId, receiverId);
+    return getConnectionRequestById(Number(info.lastInsertRowid));
 }
 
 export function acceptFriendRequest(requestId: number, receiverId: number): boolean {
@@ -145,7 +202,7 @@ export function acceptFriendRequest(requestId: number, receiverId: number): bool
             insertFriendshipStmt.run(user1Id, user2Id);
         }
 
-        const deleteRequestStmt = db.prepare('DELETE FROM FriendRequests WHERE id = ?');
+        const deleteRequestStmt = db.prepare("DELETE FROM FriendRequests WHERE id = ?");
         deleteRequestStmt.run(friendRequestId);
     });
 
@@ -161,7 +218,7 @@ export function rejectFriendRequest(requestId: number, receiverId: number): bool
     const request = getFriendRequestById(requestId);
     if (!request || request.receiver_id !== receiverId) return false;
 
-    const stmt = db.prepare('DELETE FROM FriendRequests WHERE id = ?');
+    const stmt = db.prepare("DELETE FROM FriendRequests WHERE id = ? ");
     const info = stmt.run(requestId);
     return info.changes > 0;
 }
@@ -170,7 +227,71 @@ export function cancelFriendRequest(requestId: number, requesterId: number): boo
     const request = getFriendRequestById(requestId);
     if (!request || request.requester_id !== requesterId) return false;
 
-    const stmt = db.prepare('DELETE FROM FriendRequests WHERE id = ?');
+    const stmt = db.prepare("DELETE FROM FriendRequests WHERE id = ? ");
+    const info = stmt.run(requestId);
+    return info.changes > 0;
+}
+
+export function acceptConnectionRequest(requestId: number, userId: number): boolean {
+    const tx = db.transaction((connectionRequestId: number, actingUserId: number) => {
+        const request = getConnectionRequestById(connectionRequestId);
+        if (!request) {
+            throw new Error('Connection request not found.');
+        }
+
+        // only the receiver can accept
+        if (request.receiver_id !== actingUserId) {
+            throw new Error('Not authorized to accept this connection request.');
+        }
+
+        const friendship = getFriendshipByUsers(request.requester_id, request.receiver_id);
+        if (!friendship) {
+            throw new Error('Friendship not found for these users.');
+        }
+
+        const existingConnectionStmt = db.prepare('SELECT id FROM Connections WHERE friendship_id = ?');
+        const existingConnection = existingConnectionStmt.get(friendship.id);
+        if (!existingConnection) {
+            const insertConnectionStmt = db.prepare(
+                'INSERT INTO Connections (friendship_id, folder_path) VALUES (?, ?)'
+            );
+            const info = insertConnectionStmt.run(friendship.id, '');
+            const connectionId = Number(info.lastInsertRowid);
+            const generatedPath = `/home/securedrive/${connectionId}`;
+            const updateStmt = db.prepare('UPDATE Connections SET folder_path = ? WHERE id = ?');
+            updateStmt.run(generatedPath, connectionId);
+        }
+
+        const deleteRequestStmt = db.prepare('DELETE FROM ConnectionRequests WHERE id = ?');
+        deleteRequestStmt.run(connectionRequestId);
+    });
+
+    try {
+        tx(requestId, userId);
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+export function rejectConnectionRequest(requestId: number, userId: number): boolean {
+    const request = getConnectionRequestById(requestId);
+    if (!request) return false;
+
+    if (request.receiver_id !== userId) return false;
+
+    const stmt = db.prepare('DELETE FROM ConnectionRequests WHERE id = ?');
+    const info = stmt.run(requestId);
+    return info.changes > 0;
+}
+
+export function cancelConnectionRequest(requestId: number, userId: number): boolean {
+    const request = getConnectionRequestById(requestId);
+    if (!request) return false;
+
+    if (request.requester_id !== userId) return false;
+
+    const stmt = db.prepare('DELETE FROM ConnectionRequests WHERE id = ?');
     const info = stmt.run(requestId);
     return info.changes > 0;
 }
