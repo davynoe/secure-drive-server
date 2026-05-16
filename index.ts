@@ -1,97 +1,66 @@
 import express, { Request, Response } from 'express';
 import cors from 'cors';
-import Database from 'better-sqlite3';
-import { scryptSync, randomBytes } from 'crypto';
+import { User, insertUser, deleteUser, getUserByHandle, checkPassword, getAllUsersExcept } from './db';
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-const db = new Database('../db/app.db');
 
-const PASSWORD_KEYLEN = 64;
-const PASSWORD_PEPPER = 'soujuryou';
-
-function hashPassword(password: string): string {
-    const salt = randomBytes(16).toString("hex");
-    const hash = scryptSync(password + PASSWORD_PEPPER, salt, PASSWORD_KEYLEN).toString("hex");
-
-    return `${salt}:${hash}`;
-}
-
-function verifyPassword(password: string, storedPassword: string): boolean {
-    const [salt, originalHash] = storedPassword.split(":");
-    const hash = scryptSync(password + PASSWORD_PEPPER, salt, PASSWORD_KEYLEN).toString("hex");
-    return hash === originalHash;
-}
-
-app.get('/allusers/:handle', (req: Request, res: Response) => {
-    const { handle } = req.params;
-    const stmt = db.prepare('SELECT * FROM Users WHERE handle != ?');
-    const users = stmt.all(handle);
+app.get('/allusers/:id', (req: Request, res: Response) => {
+    const { id } = req.params as { id: string };
+    const userid = Number(id);
+    const users = getAllUsersExcept(userid);
     res.json(users);
 });
 
-app.get('/checkhandle/:handle', (req: Request, res: Response) => {
-    const { handle } = req.params;
-    
-    const stmt = db.prepare('SELECT handle FROM Users WHERE handle = ?');
-    const user = stmt.get(handle);
+app.post('/signup', (req: Request, res: Response) => {
+    const { name, handle, password, email } = req.body as User;
+    const existingUser = getUserByHandle(handle);
 
-    if (user) {
-        res.json({ status: 'NO', message: 'Handle is already taken.' });
-    } else {
-        res.json({ status: 'OK', message: 'Handle is available.' });
+    if (existingUser) {
+        return res.status(400).json({ status: 'error', message: 'Handle already exists.' });
     }
-});
-
-app.post('/adduser', (req: Request, res: Response) => {
-    const { name, handle, password, email } = req.body;
 
     try {
-        const hashedPassword = hashPassword(password);
-        const stmt = db.prepare('INSERT INTO Users (name, handle, password, email) VALUES (?, ?, ?, ?)');
-        const info = stmt.run(name, handle, hashedPassword, email);
-        
-        res.json({ status: 'success', userId: info.lastInsertRowid });
+        const user = insertUser(name, handle, password, email);
+        res.json({ status: 'success', id: user.id, name: user.name, handle: user.handle, email: user.email });
     } catch (error) {
+        console.error("SQLITE ERROR:", error);
         res.status(500).json({ status: 'error', message: 'Failed to create user.' });
     }
 });
 
-app.post('/checkpassword', (req: Request, res: Response) => {
-    const { handle, password } = req.body;
-
-    const stmt = db.prepare('SELECT password FROM Users WHERE handle = ?');
-    const user = stmt.get(handle) as { password?: string } | undefined;
-
+app.post('/login', (req: Request, res: Response) => {
+    const { handle, password } = req.body as { handle: string; password: string };
+    const user = getUserByHandle(handle);
+    
     if (!user) {
-        res.status(404).json({ status: 'error', message: 'User not found.' });
-        return;
+        return res.status(404).json({ status: 'error', message: 'User not found.' });
     }
 
-    if (typeof user.password === 'string' && verifyPassword(password, user.password)) {
-        res.json({ status: 'OK', message: 'Password matches.' });
+    if (checkPassword(user.id, password)) {
+        res.json({ status: 'success', id: user.id, name: user.name, handle: user.handle, email: user.email });
     } else {
-        res.json({ status: 'NO', message: 'Incorrect password.' });
+        res.status(401).json({ status: 'error', message: 'Invalid password.' });
     }
 });
 
-app.delete('/deleteuser/:handle', (req: Request, res: Response) => {
-    const { handle } = req.params;
+app.delete('/deleteuser/:id', (req: Request, res: Response) => {
+    const { id } = req.params as { id: string };
+    const userid = Number(id);
 
     try {
-        const stmt = db.prepare('DELETE FROM Users WHERE handle = ?');
-        const info = stmt.run(handle);
+        const result = deleteUser(userid);
 
-        if (info.changes > 0) {
+        if (result) {
             res.json({ status: 'success', message: 'User deleted.' });
         } else {
             res.status(404).json({ status: 'error', message: 'User not found.' });
         }
     } catch (error) {
-        console.error("SQLITE ERROR:", error); // <-- Add this line!
-        res.status(500).json({ status: 'error', message: error });
+        console.error("SQLITE ERROR:", error);
+        res.status(500).json({ status: 'error', message: 'Failed to delete user.' });
     }
 });
 
