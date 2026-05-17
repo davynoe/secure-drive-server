@@ -344,6 +344,19 @@ export function upsertFileMetadata(
     return getFileMetadataById(Number(info.lastInsertRowid)) as FileMetadata;
 }
 
+export function updateFileMetadataLocation(id: number, relativePath: string, filename: string): FileMetadata | null {
+    const stmt = db.prepare(
+        'UPDATE FileMetadata SET relative_path = ?, filename = ?, version = version + 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+    );
+    const info = stmt.run(relativePath, filename, id);
+
+    if (info.changes === 0) {
+        return null;
+    }
+
+    return getFileMetadataById(id);
+}
+
 export function deleteFileMetadata(id: number): boolean {
     const stmt = db.prepare('DELETE FROM FileMetadata WHERE id = ?');
     const info = stmt.run(id);
