@@ -35,13 +35,13 @@ export interface ConnectionRequest {
     description: string;
     requester_id: number;
     receiver_id: number;
+    initial_base_id: number;
     created_at?: string;
 }
 
 export interface Connection {
     id: number;
     friendship_id: number;
-    folder_path: string;
     created_at?: string;
     last_modified?: string;
 }
@@ -166,24 +166,34 @@ export function createConnectionRequest(
     requesterId: number,
     receiverId: number,
     title: string,
-    description: string
+    description: string,
+    initialBaseId: number,
 ): ConnectionRequest | null {
     if (requesterId === receiverId) return null;
+
+    if (initialBaseId !== requesterId && initialBaseId !== receiverId) return null;
+
+    if (!getUserById(requesterId) || !getUserById(receiverId) || !getUserById(initialBaseId)) {
+        return null;
+    }
 
     const friendship = getFriendshipByUsers(requesterId, receiverId);
     if (!friendship) return null;
 
     const existingRequestStmt = db.prepare(
-        `SELECT id FROM ConnectionRequests WHERE requester_id = ? AND receiver_id = ?`);
-    const existingRequest = existingRequestStmt.get(requesterId, receiverId);
+        'SELECT id FROM ConnectionRequests WHERE ((requester_id = ? AND receiver_id = ?) OR (requester_id = ? AND receiver_id = ?))',
+    );
+    const existingRequest = existingRequestStmt.get(requesterId, receiverId, receiverId, requesterId);
     if (existingRequest) return null;
 
     const existingConnectionStmt = db.prepare('SELECT id FROM Connections WHERE friendship_id = ?');
     const existingConnection = existingConnectionStmt.get(friendship.id);
     if (existingConnection) return null;
 
-    const stmt = db.prepare('INSERT INTO ConnectionRequests (title, description, requester_id, receiver_id) VALUES (?, ?, ?, ?)');
-    const info = stmt.run(title, description, requesterId, receiverId);
+    const stmt = db.prepare(
+        'INSERT INTO ConnectionRequests (title, description, requester_id, receiver_id, initial_base_id) VALUES (?, ?, ?, ?, ?)',
+    );
+    const info = stmt.run(title, description, requesterId, receiverId, initialBaseId);
     return getConnectionRequestById(Number(info.lastInsertRowid));
 }
 
@@ -252,14 +262,8 @@ export function acceptConnectionRequest(requestId: number, userId: number): bool
         const existingConnectionStmt = db.prepare('SELECT id FROM Connections WHERE friendship_id = ?');
         const existingConnection = existingConnectionStmt.get(friendship.id);
         if (!existingConnection) {
-            const insertConnectionStmt = db.prepare(
-                'INSERT INTO Connections (friendship_id, folder_path) VALUES (?, ?)'
-            );
-            const info = insertConnectionStmt.run(friendship.id, '');
-            const connectionId = Number(info.lastInsertRowid);
-            const generatedPath = `/home/securedrive/${connectionId}`;
-            const updateStmt = db.prepare('UPDATE Connections SET folder_path = ? WHERE id = ?');
-            updateStmt.run(generatedPath, connectionId);
+            const insertConnectionStmt = db.prepare('INSERT INTO Connections (friendship_id) VALUES (?)');
+            insertConnectionStmt.run(friendship.id);
         }
 
         const deleteRequestStmt = db.prepare('DELETE FROM ConnectionRequests WHERE id = ?');

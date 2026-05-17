@@ -148,8 +148,8 @@ app.post('/friend-requests/:requestId/cancel', (req: Request, res: Response) => 
 });
 
 app.post('/connection-requests', (req: Request, res: Response) => {
-    const { requesterId, receiverId, title, description } = req.body as { requesterId: number; receiverId: number; title: string; description: string };
-    const connectionRequest = createConnectionRequest(requesterId, receiverId, title, description);
+    const { requesterId, receiverId, title, description, initialBaseId } = req.body as { requesterId: number; receiverId: number; title: string; description: string; initialBaseId: number };
+    const connectionRequest = createConnectionRequest(requesterId, receiverId, title, description, initialBaseId);
 
     if (!connectionRequest) {
         return res.status(400).json({
