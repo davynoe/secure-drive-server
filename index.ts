@@ -18,6 +18,13 @@ import {
     rejectConnectionRequest,
     cancelConnectionRequest,
     UserWithPassword,
+    FileMetadata,
+    FileChange,
+    upsertFileMetadata,
+    getFileMetadataByConnectionPath,
+    deleteFileMetadata,
+    appendFileChange,
+    getChangesSince,
 } from './db';
 
 const app = express();
@@ -158,7 +165,7 @@ app.post('/connection-requests', (req: Request, res: Response) => {
         });
     }
 
-    res.json({ status: 'success', connectionRequest });
+    res.json({ status: 'success', connectionId: connectionRequest.id, connectionRequest });
 });
 
 app.get('/connection-requests/:id', (req: Request, res: Response) => {
@@ -169,15 +176,20 @@ app.get('/connection-requests/:id', (req: Request, res: Response) => {
 });
 
 app.post('/connection-requests/:requestId/accept', (req: Request, res: Response) => {
-    const { requestId } = req.params as { requestId: string };
-    const { userId } = req.body as { userId: number };
-    const ok = acceptConnectionRequest(Number(requestId), userId);
+  const { requestId } = req.params as { requestId: string };
+  const { userId } = req.body as { userId: number };
 
-    if (!ok) {
-        return res.status(400).json({ status: 'error', message: 'Unable to accept connection request.' });
-    }
+  const connectionId = acceptConnectionRequest(Number(requestId), userId);
 
-    res.json({ status: 'success', message: 'Connection request accepted.' });
+  if (typeof connectionId !== 'number') {
+    return res.status(400).json({ status: 'error', message: 'Unable to accept connection request.' });
+  }
+
+  return res.json({
+    status: 'success',
+    message: 'Connection request accepted.',
+    connectionId,
+  });
 });
 
 app.post('/connection-requests/:requestId/reject', (req: Request, res: Response) => {
@@ -202,6 +214,91 @@ app.post('/connection-requests/:requestId/cancel', (req: Request, res: Response)
     }
 
     res.json({ status: 'success', message: 'Connection request canceled.' });
+});
+
+// File sync endpoints
+app.post('/sync/:connectionId/file', (req: Request, res: Response) => {
+    const { connectionId } = req.params as { connectionId: string };
+    const {
+        actorUserId,
+        relativePath,
+        filename,
+        isDirectory,
+        size,
+        contentHash,
+        deleted,
+    } = req.body as {
+        actorUserId: number;
+        relativePath: string;
+        filename: string;
+        isDirectory: number;
+        size?: number | null;
+        contentHash?: string | null;
+        deleted?: number;
+    };
+
+    try {
+        const metadata = upsertFileMetadata(Number(connectionId), relativePath, filename, isDirectory, size ?? null, contentHash ?? null, deleted ?? 0, actorUserId);
+        const change = appendFileChange(Number(connectionId), metadata.id, actorUserId, deleted ? 'delete' : 'update', null, relativePath, contentHash ?? null);
+        res.json({ status: 'success', metadata, changeId: change.id });
+    } catch (err) {
+        console.error('SYNC ERROR:', err);
+        res.status(500).json({ status: 'error', message: 'Failed to upsert file metadata.' });
+    }
+});
+
+app.post('/sync/:connectionId/rename', (req: Request, res: Response) => {
+    const { connectionId } = req.params as { connectionId: string };
+    const { actorUserId, pathBefore, pathAfter, filenameAfter } = req.body as { actorUserId: number; pathBefore: string; pathAfter: string; filenameAfter: string };
+
+    try {
+        const existing = getFileMetadataByConnectionPath(Number(connectionId), pathBefore);
+        if (!existing) return res.status(404).json({ status: 'error', message: 'File not found.' });
+
+        // update metadata to new path/name
+        const metadata = upsertFileMetadata(Number(connectionId), pathAfter, filenameAfter, existing.is_directory, existing.size ?? null, existing.content_hash ?? null, 0, actorUserId);
+        // remove old metadata row
+        if (existing.id !== metadata.id) {
+            deleteFileMetadata(existing.id);
+        }
+
+        const change = appendFileChange(Number(connectionId), metadata.id, actorUserId, 'rename', pathBefore, pathAfter, metadata.content_hash ?? null);
+        res.json({ status: 'success', metadata, changeId: change.id });
+    } catch (err) {
+        console.error('RENAME ERROR:', err);
+        res.status(500).json({ status: 'error', message: 'Failed to rename file.' });
+    }
+});
+
+app.delete('/sync/:connectionId/file', (req: Request, res: Response) => {
+    const { connectionId } = req.params as { connectionId: string };
+    const { actorUserId, relativePath } = req.body as { actorUserId: number; relativePath: string };
+
+    try {
+        const existing = getFileMetadataByConnectionPath(Number(connectionId), relativePath);
+        if (!existing) return res.status(404).json({ status: 'error', message: 'File not found.' });
+
+        const metadata = upsertFileMetadata(Number(connectionId), relativePath, existing.filename, existing.is_directory, existing.size ?? null, existing.content_hash ?? null, 1, actorUserId);
+        const change = appendFileChange(Number(connectionId), metadata.id, actorUserId, 'delete', relativePath, null, metadata.content_hash ?? null);
+        res.json({ status: 'success', metadata, changeId: change.id });
+    } catch (err) {
+        console.error('DELETE ERROR:', err);
+        res.status(500).json({ status: 'error', message: 'Failed to delete file.' });
+    }
+});
+
+app.get('/sync/:connectionId/changes', (req: Request, res: Response) => {
+    const { connectionId } = req.params as { connectionId: string };
+    const cursor = Number(req.query.cursor || 0);
+    const limit = Number(req.query.limit || 100);
+
+    try {
+        const changes = getChangesSince(Number(connectionId), cursor, limit);
+        res.json({ status: 'success', changes });
+    } catch (err) {
+        console.error('FETCH CHANGES ERROR:', err);
+        res.status(500).json({ status: 'error', message: 'Failed to fetch changes.' });
+    }
 });
 
 
