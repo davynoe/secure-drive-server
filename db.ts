@@ -156,6 +156,14 @@ export function getFriendshipById(friendshipId: number): Friendship | null {
     return typeof row?.id === 'number' ? row : null;
 }
 
+export function deleteFriendship(userId: number, friendId: number): boolean {
+    if (userId === friendId) return false;
+    const [user1Id, user2Id] = normalizeFriendPair(userId, friendId);
+    const stmt = db.prepare('DELETE FROM Friendships WHERE user1_id = ? AND user2_id = ?');
+    const info = stmt.run(user1Id, user2Id);
+    return info.changes > 0;
+}
+
 export function getFriendsForUser(userid: number): User[] {
     const stmt = db.prepare(
         `SELECT u.id, u.name, u.handle, u.email
@@ -296,6 +304,27 @@ export function cancelConnectionRequest(requestId: number, userId: number): bool
     const stmt = db.prepare('DELETE FROM Connections WHERE id = ?');
     const info = stmt.run(requestId);
     return info.changes > 0;
+}
+
+export function deleteConnectionAndData(connectionId: number, actingUserId: number): boolean {
+    const tx = db.transaction((id: number, userId: number) => {
+        const connection = getConnectionById(id);
+        if (!connection) throw new Error('Connection not found.');
+        if (connection.requester_id !== userId && connection.receiver_id !== userId) {
+            throw new Error('Not authorized.');
+        }
+
+        db.prepare('DELETE FROM FileChanges WHERE connection_id = ?').run(id);
+        db.prepare('DELETE FROM FileMetadata WHERE connection_id = ?').run(id);
+        const info = db.prepare('DELETE FROM Connections WHERE id = ?').run(id);
+        return info.changes > 0;
+    });
+
+    try {
+        return Boolean(tx(connectionId, actingUserId));
+    } catch {
+        return false;
+    }
 }
 
 // FileMetadata helpers

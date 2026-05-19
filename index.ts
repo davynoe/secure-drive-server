@@ -15,6 +15,7 @@ import {
     acceptFriendRequest,
     rejectFriendRequest,
     cancelFriendRequest,
+    deleteFriendship,
     createConnectionRequest,
     getConnectionRequestsForUser,
     acceptConnectionRequest,
@@ -31,6 +32,7 @@ import {
     getChangesSince,
     listFilesForConnection,
     getConnectionById,
+    deleteConnectionAndData,
 } from './db';
 
 const app = express();
@@ -281,6 +283,31 @@ app.get('/friends/:id', (req: Request, res: Response) => {
     res.json(friends);
 });
 
+app.delete('/friends/:friendId', (req: Request, res: Response) => {
+    const { friendId } = req.params as { friendId: string };
+    const { userId } = req.body as { userId: number };
+    const parsedFriendId = Number(friendId);
+
+    if (!userId) {
+        return res.status(400).json({ status: 'error', message: 'userId is required.' });
+    }
+
+    if (!Number.isFinite(parsedFriendId)) {
+        return res.status(400).json({ status: 'error', message: 'friendId is required.' });
+    }
+
+    if (userId === parsedFriendId) {
+        return res.status(400).json({ status: 'error', message: 'Cannot delete self as friend.' });
+    }
+
+    const ok = deleteFriendship(userId, parsedFriendId);
+    if (!ok) {
+        return res.status(404).json({ status: 'error', message: 'Friendship not found.' });
+    }
+
+    return res.json({ status: 'success', message: 'Friend deleted.' });
+});
+
 app.post('/friend-requests/:requestId/accept', (req: Request, res: Response) => {
     const { requestId } = req.params as { requestId: string };
     const { userId } = req.body as { userId: number };
@@ -377,6 +404,34 @@ app.post('/connection-requests/:requestId/cancel', (req: Request, res: Response)
     }
 
     res.json({ status: 'success', message: 'Connection request canceled.' });
+});
+
+app.delete('/connections/:connectionId', (req: Request, res: Response) => {
+    const connectionId = Number((req.params as { connectionId: string }).connectionId);
+    const { userId } = req.body as { userId: number };
+
+    if (!userId) {
+        return res.status(400).json({ status: 'error', message: 'userId is required.' });
+    }
+
+    const connection = getConnectionById(connectionId);
+    if (!connection) {
+        return res.status(404).json({ status: 'error', message: 'Connection not found.' });
+    }
+
+    if (connection.requester_id !== userId && connection.receiver_id !== userId) {
+        return res.status(403).json({ status: 'error', message: 'Not authorized for this connection.' });
+    }
+
+    const ok = deleteConnectionAndData(connectionId, userId);
+    if (!ok) {
+        return res.status(500).json({ status: 'error', message: 'Failed to delete connection.' });
+    }
+
+    const storagePath = getConnectionStoragePath(connectionId);
+    fs.rmSync(storagePath, { recursive: true, force: true });
+
+    return res.json({ status: 'success', message: 'Connection deleted.' });
 });
 
 // File sync endpoints
