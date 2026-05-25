@@ -3,6 +3,8 @@ import cors from 'cors';
 import fs from 'fs';
 import path from 'path';
 import { createHash } from 'crypto';
+import http from 'http';
+import { WebSocketServer, WebSocket } from 'ws';
 import {
     insertUser,
     deleteUser,
@@ -12,6 +14,7 @@ import {
     createFriendRequest,
     getFriendRequestsForUser,
     getFriendsForUser,
+    getFriendRequestById,
     acceptFriendRequest,
     rejectFriendRequest,
     cancelFriendRequest,
@@ -39,6 +42,43 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: '200mb' }));
 app.use(express.urlencoded({ limit: '200mb', extended: true }));
+
+type ClientMessage = { type: 'auth'; userId: number };
+
+const userSockets = new Map<number, Set<WebSocket>>();
+
+function addUserSocket(userId: number, socket: WebSocket): void {
+    const sockets = userSockets.get(userId) ?? new Set<WebSocket>();
+    sockets.add(socket);
+    userSockets.set(userId, sockets);
+}
+
+function removeUserSocket(userId: number, socket: WebSocket): void {
+    const sockets = userSockets.get(userId);
+    if (!sockets) return;
+    sockets.delete(socket);
+    if (sockets.size === 0) userSockets.delete(userId);
+}
+
+function sendJson(socket: WebSocket, payload: unknown): void {
+    if (socket.readyState !== WebSocket.OPEN) return;
+    socket.send(JSON.stringify(payload));
+}
+
+function emitToUser(userId: number, payload: unknown): void {
+    const sockets = userSockets.get(userId);
+    if (!sockets) return;
+    for (const socket of sockets) {
+        sendJson(socket, payload);
+    }
+}
+
+function emitToUsers(userIds: number[], payload: unknown): void {
+    const uniqueUserIds = new Set(userIds);
+    for (const userId of uniqueUserIds) {
+        emitToUser(userId, payload);
+    }
+}
 
 const STORAGE_ROOT = path.resolve('../sync-storage');
 // Max allowed chunk size in bytes for upload-chunk (keep reasonably small to avoid JSON/body buffering)
@@ -266,6 +306,7 @@ app.post('/friend-requests', (req: Request, res: Response) => {
         });
     }
 
+    emitToUser(receiverId, { event: 'friendRequest:new', data: { request: friendRequest } });
     res.json({ status: 'success', friendRequest });
 });
 
@@ -311,36 +352,57 @@ app.delete('/friends/:friendId', (req: Request, res: Response) => {
 app.post('/friend-requests/:requestId/accept', (req: Request, res: Response) => {
     const { requestId } = req.params as { requestId: string };
     const { userId } = req.body as { userId: number };
+    const request = getFriendRequestById(Number(requestId));
     const ok = acceptFriendRequest(Number(requestId), userId);
 
     if (!ok) {
         return res.status(400).json({ status: 'error', message: 'Unable to accept friend request.' });
     }
 
+    if (request) {
+        emitToUsers([request.requester_id, request.receiver_id], {
+            event: 'friendRequest:accepted',
+            data: { requestId: request.id, userId },
+        });
+    }
     res.json({ status: 'success', message: 'Friend request accepted.' });
 });
 
 app.post('/friend-requests/:requestId/reject', (req: Request, res: Response) => {
     const { requestId } = req.params as { requestId: string };
     const { userId } = req.body as { userId: number };
+    const request = getFriendRequestById(Number(requestId));
     const ok = rejectFriendRequest(Number(requestId), userId);
 
     if (!ok) {
         return res.status(400).json({ status: 'error', message: 'Unable to reject friend request.' });
     }
 
+    if (request) {
+        emitToUsers([request.requester_id, request.receiver_id], {
+            event: 'friendRequest:rejected',
+            data: { requestId: request.id, userId },
+        });
+    }
     res.json({ status: 'success', message: 'Friend request rejected.' });
 });
 
 app.post('/friend-requests/:requestId/cancel', (req: Request, res: Response) => {
     const { requestId } = req.params as { requestId: string };
     const { userId } = req.body as { userId: number };
+    const request = getFriendRequestById(Number(requestId));
     const ok = cancelFriendRequest(Number(requestId), userId);
 
     if (!ok) {
         return res.status(400).json({ status: 'error', message: 'Unable to cancel friend request.' });
     }
 
+    if (request) {
+        emitToUsers([request.requester_id, request.receiver_id], {
+            event: 'friendRequest:canceled',
+            data: { requestId: request.id, userId },
+        });
+    }
     res.json({ status: 'success', message: 'Friend request canceled.' });
 });
 
@@ -355,6 +417,7 @@ app.post('/connection-requests', (req: Request, res: Response) => {
         });
     }
 
+    emitToUser(receiverId, { event: 'connectionRequest:new', data: { request: connectionRequest } });
     res.json({ status: 'success', connectionId: connectionRequest.id, connectionRequest });
 });
 
@@ -368,12 +431,20 @@ app.get('/connection-requests/:id', (req: Request, res: Response) => {
 app.post('/connection-requests/:requestId/accept', (req: Request, res: Response) => {
   const { requestId } = req.params as { requestId: string };
   const { userId } = req.body as { userId: number };
+    const request = getConnectionById(Number(requestId));
 
   const connectionId = acceptConnectionRequest(Number(requestId), userId);
 
   if (typeof connectionId !== 'number') {
     return res.status(400).json({ status: 'error', message: 'Unable to accept connection request.' });
   }
+
+    if (request) {
+        emitToUsers([request.requester_id, request.receiver_id], {
+            event: 'connectionRequest:accepted',
+            data: { requestId: request.id, userId, connectionId },
+        });
+    }
 
   return res.json({
     status: 'success',
@@ -385,10 +456,18 @@ app.post('/connection-requests/:requestId/accept', (req: Request, res: Response)
 app.post('/connection-requests/:requestId/reject', (req: Request, res: Response) => {
     const { requestId } = req.params as { requestId: string };
     const { userId } = req.body as { userId: number };
+    const request = getConnectionById(Number(requestId));
     const ok = rejectConnectionRequest(Number(requestId), userId);
 
     if (!ok) {
         return res.status(400).json({ status: 'error', message: 'Unable to reject connection request.' });
+    }
+
+    if (request) {
+        emitToUsers([request.requester_id, request.receiver_id], {
+            event: 'connectionRequest:rejected',
+            data: { requestId: request.id, userId },
+        });
     }
 
     res.json({ status: 'success', message: 'Connection request rejected.' });
@@ -397,10 +476,18 @@ app.post('/connection-requests/:requestId/reject', (req: Request, res: Response)
 app.post('/connection-requests/:requestId/cancel', (req: Request, res: Response) => {
     const { requestId } = req.params as { requestId: string };
     const { userId } = req.body as { userId: number };
+    const request = getConnectionById(Number(requestId));
     const ok = cancelConnectionRequest(Number(requestId), userId);
 
     if (!ok) {
         return res.status(400).json({ status: 'error', message: 'Unable to cancel connection request.' });
+    }
+
+    if (request) {
+        emitToUsers([request.requester_id, request.receiver_id], {
+            event: 'connectionRequest:canceled',
+            data: { requestId: request.id, userId },
+        });
     }
 
     res.json({ status: 'success', message: 'Connection request canceled.' });
@@ -427,6 +514,11 @@ app.delete('/connections/:connectionId', (req: Request, res: Response) => {
     if (!ok) {
         return res.status(500).json({ status: 'error', message: 'Failed to delete connection.' });
     }
+
+    emitToUsers([connection.requester_id, connection.receiver_id], {
+        event: 'connection:deleted',
+        data: { connectionId },
+    });
 
     const storagePath = getConnectionStoragePath(connectionId);
     fs.rmSync(storagePath, { recursive: true, force: true });
@@ -798,7 +890,37 @@ app.get('/sync/:connectionId/changes', (req: Request, res: Response) => {
 });
 
 
+const server = http.createServer(app);
+const wss = new WebSocketServer({ server });
+
+wss.on('connection', (socket) => {
+    let authedUserId: number | null = null;
+
+    socket.on('message', (data) => {
+        try {
+            const payload = JSON.parse(data.toString()) as ClientMessage;
+            if (payload?.type !== 'auth' || typeof payload.userId !== 'number') return;
+
+            if (authedUserId !== null) {
+                removeUserSocket(authedUserId, socket);
+            }
+
+            authedUserId = payload.userId;
+            addUserSocket(authedUserId, socket);
+            sendJson(socket, { event: 'auth:ok', data: { userId: authedUserId } });
+        } catch {
+            sendJson(socket, { event: 'error', data: { message: 'Invalid message.' } });
+        }
+    });
+
+    socket.on('close', () => {
+        if (authedUserId !== null) {
+            removeUserSocket(authedUserId, socket);
+        }
+    });
+});
+
 const PORT = 3000;
-app.listen(PORT, () => {
+server.listen(PORT, () => {
     console.log(`Server is running on http://localhost:${PORT}`);
 });
